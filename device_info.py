@@ -72,26 +72,26 @@ def print_gpu_limits():
     device = cuda.Device(0)
     attributes = device.get_attributes()
     
-    print(f"--- {device.name()} Donanım Limitleri ---")
+    print(f"--- {device.name()} Hardware Limits ---")
     
-    # SM (Streaming Multiprocessor) Sayısı
+    # SM (Streaming Multiprocessor) count
     sm_count = attributes[cuda.device_attribute.MULTIPROCESSOR_COUNT]
-    print(f"SM Sayısı (Multiprocessor Count): {sm_count}")
+    print(f"SM Count (Multiprocessor Count): {sm_count}")
     
-    # Block ve Thread Sınırları
+    # Block and thread limits
     max_threads_per_block = attributes[cuda.device_attribute.MAX_THREADS_PER_BLOCK]
-    print(f"Block Başına Maksimum Thread: {max_threads_per_block}")
+    print(f"Maximum Threads per Block: {max_threads_per_block}")
     
-    # Register Sınırları (En kritik olanı!)
+    # Register limits (most critical)
     max_registers_per_block = attributes[cuda.device_attribute.MAX_REGISTERS_PER_BLOCK]
-    print(f"Block Başına Maksimum Register (Yazmaç): {max_registers_per_block}")
+    print(f"Maximum Registers per Block: {max_registers_per_block}")
     
-    # Paylaşımlı Bellek (Shared Memory) Sınırları
+    # Shared memory limits
     max_shared_memory_per_block = attributes[cuda.device_attribute.MAX_SHARED_MEMORY_PER_BLOCK]
-    print(f"Block Başına Maksimum Paylaşımlı Bellek: {max_shared_memory_per_block} bytes ({max_shared_memory_per_block/1024:.2f} KB)")
+    print(f"Maximum Shared Memory per Block: {max_shared_memory_per_block} bytes ({max_shared_memory_per_block/1024:.2f} KB)")
 
     tuning = recommend_matmul_tuning(attributes)
-    print("--- Önerilen FP32 Matmul Tuning ---")
+    print("--- Recommended FP32 Matmul Tuning ---")
     print(f"Tiled Tile: {tuning['tiled_tile']}")
     print(f"Vectorized Tile: {tuning['vec_tile']}")
     print(f"Vector Width: {tuning['vec_width']}")

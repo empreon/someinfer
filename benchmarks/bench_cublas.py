@@ -9,11 +9,9 @@ import pycuda.driver as cuda
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from src.engine import CudaEngine
-    from src.utils import build_matmul_vectorized_launch_config, gemm_gflops, gpu_benchmark
-else:
-    from .engine import CudaEngine
-    from .utils import build_matmul_vectorized_launch_config, gemm_gflops, gpu_benchmark
+
+from src.engine import CudaEngine
+from src.utils import build_matmul_vectorized_launch_config, gemm_gflops, gpu_benchmark
 
 
 def _run_cublas_row_major(

@@ -6,7 +6,7 @@ def recommend_matmul_tuning(attributes):
     max_registers_per_block = attributes[cuda.device_attribute.MAX_REGISTERS_PER_BLOCK]
     max_shared_memory_per_block = attributes[cuda.device_attribute.MAX_SHARED_MEMORY_PER_BLOCK]
 
-    # RTX 4050 Laptop profile shortcut.
+    # RTX 4050 Laptop profile shortcut
     if (
         max_threads_per_block >= 1024
         and max_registers_per_block >= 65536
@@ -82,7 +82,7 @@ def print_gpu_limits():
     max_threads_per_block = attributes[cuda.device_attribute.MAX_THREADS_PER_BLOCK]
     print(f"Maximum Threads per Block: {max_threads_per_block}")
     
-    # Register limits (most critical)
+    # Register limits
     max_registers_per_block = attributes[cuda.device_attribute.MAX_REGISTERS_PER_BLOCK]
     print(f"Maximum Registers per Block: {max_registers_per_block}")
     

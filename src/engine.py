@@ -8,20 +8,19 @@ import pycuda.autoinit  # noqa: F401
 import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
 
-from src.utils import (
-    build_elementwise_launch_config,
-    build_matmul_launch_config,
-    build_matmul_tiled_launch_config,
-    build_matmul_vectorized_launch_config,
-)
+
+def _ceil_div(value: int, divisor: int) -> int:
+    return (value + divisor - 1) // divisor
 
 
-class CudaEngine:
+class Engine:
+    TILED_TILE = 32
+    VEC_TILE = 32
+    VEC_WIDTH = 4
+    VBLOCK_ROWS = 2
+
     def __init__(
-        self,
-        kernel_dir: Optional[Path | str] = None,
-        nvcc_options: Optional[list[str]] = None,
-        compile_on_init: bool = True,
+        self, kernel_dir: Optional[Path | str] = None, nvcc_options: Optional[list[str]] = None
     ) -> None:
         self.kernel_dir = (
             Path(kernel_dir).resolve()
@@ -35,108 +34,22 @@ class CudaEngine:
         self._modules: Dict[str, SourceModule] = {}
         self._kernel_cache: Dict[Tuple[str, str], cuda.Function] = {}
         self._memory_pool: Dict[str, Tuple[cuda.DeviceAllocation, int]] = {}
-        self._matmul_tuning = self._build_matmul_tuning()
-
-        if compile_on_init:
-            self.compile_all()
 
     def _normalize_module_name(self, file_name: str | Path) -> str:
         return Path(file_name).as_posix()
-
-    def _build_matmul_tuning(self) -> Dict[str, int]:
-        defaults = {
-            "tiled_tile": 32,
-            "vec_tile": 32,
-            "vec_width": 4,
-            "vblock_rows": 2,
-        }
-        try:
-            attributes = cuda.Context.get_device().get_attributes()
-        except cuda.LogicError:
-            return defaults
-
-        max_threads = int(attributes.get(cuda.device_attribute.MAX_THREADS_PER_BLOCK, 1024))
-        max_shared = int(
-            attributes.get(cuda.device_attribute.MAX_SHARED_MEMORY_PER_BLOCK, 48 * 1024)
-        )
-        max_registers = int(attributes.get(cuda.device_attribute.MAX_REGISTERS_PER_BLOCK, 65536))
-
-        # RTX 4050 Laptop class profile
-        # 32x32 vectorized tile with vblock_rows=2 (block=(8,16,1)).
-        if (
-            max_threads >= 1024
-            and max_shared >= 48 * 1024
-            and max_registers >= 65536
-        ):
-            return defaults
-
-        tiled_tile = defaults["tiled_tile"]
-        for candidate_tile in (32, 16, 8):
-            threads = candidate_tile * candidate_tile
-            shared_bytes = 2 * candidate_tile * candidate_tile * np.dtype(np.float32).itemsize
-            reg_budget_per_thread = max_registers // max(1, threads)
-            if (
-                threads <= max_threads
-                and shared_bytes <= max_shared
-                and reg_budget_per_thread >= 32
-            ):
-                tiled_tile = candidate_tile
-                break
-
-        vec_width = defaults["vec_width"]
-        best_score: Optional[Tuple[int, int, int]] = None
-        vec_tile = 16
-        vblock_rows = 1
-        for candidate_tile in (32, 16):
-            if candidate_tile % vec_width != 0:
-                continue
-            shared_bytes = 2 * candidate_tile * candidate_tile * np.dtype(np.float32).itemsize
-            if shared_bytes > max_shared:
-                continue
-            for candidate_vblock_rows in (2, 1, 4):
-                if candidate_tile % candidate_vblock_rows != 0:
-                    continue
-                threads = (candidate_tile // vec_width) * (
-                    candidate_tile // candidate_vblock_rows
-                )
-                reg_budget_per_thread = max_registers // max(1, threads)
-                if threads > max_threads or threads < 64 or reg_budget_per_thread < 32:
-                    continue
-                score = (
-                    candidate_tile,
-                    -abs(threads - 128),
-                    int(candidate_vblock_rows == 2),
-                )
-                if best_score is None or score > best_score:
-                    best_score = score
-                    vec_tile = candidate_tile
-                    vblock_rows = candidate_vblock_rows
-
-        return {
-            "tiled_tile": tiled_tile,
-            "vec_tile": vec_tile,
-            "vec_width": vec_width,
-            "vblock_rows": vblock_rows,
-        }
 
     def _build_compile_options(self, module_name: str) -> list[str]:
         options = [*self.nvcc_options, "-I", str(self.kernel_dir)]
         if module_name == "fp32/matmul.cu":
             options.extend(
                 [
-                    f"-DMM_TILED_TILE={self._matmul_tuning['tiled_tile']}",
-                    f"-DMM_VEC_TILE={self._matmul_tuning['vec_tile']}",
-                    f"-DMM_VEC_WIDTH={self._matmul_tuning['vec_width']}",
-                    f"-DMM_VBLOCK_ROWS={self._matmul_tuning['vblock_rows']}",
+                    f"-DMM_TILED_TILE={self.TILED_TILE}",
+                    f"-DMM_VEC_TILE={self.VEC_TILE}",
+                    f"-DMM_VEC_WIDTH={self.VEC_WIDTH}",
+                    f"-DMM_VBLOCK_ROWS={self.VBLOCK_ROWS}",
                 ]
             )
         return options
-
-    def compile_all(self) -> None:
-        cu_sources = sorted(self.kernel_dir.rglob("*.cu"))
-        for cu_file in cu_sources:
-            module_name = cu_file.relative_to(self.kernel_dir).as_posix()
-            self.compile_kernel_file(module_name)
 
     def compile_kernel_file(self, file_name: str | Path) -> SourceModule:
         module_name = self._normalize_module_name(file_name)
@@ -243,29 +156,24 @@ class CudaEngine:
 
         function = self.get_kernel(kernel_map[kernel], module_name="fp32/matmul.cu")
         if kernel == "naive":
-            grid, launch_block = build_matmul_launch_config(m, n, block=block)
+            launch_block = block
+            grid = (_ceil_div(n, launch_block[0]), _ceil_div(m, launch_block[1]), 1)
         elif kernel == "tiled":
-            grid, launch_block = build_matmul_tiled_launch_config(
-                m, n, tile_size=self._matmul_tuning["tiled_tile"]
-            )
+            launch_block = (self.TILED_TILE, self.TILED_TILE, 1)
+            grid = (_ceil_div(n, self.TILED_TILE), _ceil_div(m, self.TILED_TILE), 1)
         else:
+            launch_block = (self.VEC_TILE // self.VEC_WIDTH, self.VEC_TILE // self.VBLOCK_ROWS, 1)
             expected_block = (
-                self._matmul_tuning["vec_tile"] // self._matmul_tuning["vec_width"],
-                self._matmul_tuning["vec_tile"] // self._matmul_tuning["vblock_rows"],
+                self.VEC_TILE // self.VEC_WIDTH,
+                self.VEC_TILE // self.VBLOCK_ROWS,
                 1,
             )
-            if block not in ((16, 16, 1), (4, 16, 1), expected_block):
+            if block not in ((16, 16, 1), expected_block):
                 raise ValueError(
-                    f"Vectorized matmul uses auto-tuned block={expected_block}. "
-                    "Use default block or explicitly pass the tuned value."
+                    f"Vectorized matmul uses fixed block={expected_block}. "
+                    "Use default block or explicitly pass the fixed value."
                 )
-            grid, launch_block = build_matmul_vectorized_launch_config(
-                m,
-                n,
-                tile_size=self._matmul_tuning["vec_tile"],
-                vec_width=self._matmul_tuning["vec_width"],
-                vblock_rows=self._matmul_tuning["vblock_rows"],
-            )
+            grid = (_ceil_div(n, self.VEC_TILE), _ceil_div(m, self.VEC_TILE), 1)
 
         function(
             a_gpu,
@@ -297,7 +205,7 @@ class CudaEngine:
             raise ValueError(f"Unsupported activation: {activation}")
 
         function = self.get_kernel(activation_map[activation], module_name="fp32/activations.cu")
-        grid, block = build_elementwise_launch_config(numel, block=block)
+        grid = (_ceil_div(numel, block[0]), 1, 1)
         function(
             x_gpu,
             y_gpu,

@@ -9,8 +9,8 @@ import numpy as np
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.engine import CudaEngine
-from src.utils import build_matmul_vectorized_launch_config, gemm_gflops, gpu_benchmark
+from src.engine import Engine
+from src.utils import gemm_gflops, gpu_benchmark
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,10 +30,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_block(args: argparse.Namespace, m: int, n: int, kernel: str) -> tuple[int, int, int]:
+def _resolve_block(args: argparse.Namespace, kernel: str) -> tuple[int, int, int]:
     if kernel == "vectorized":
-        _, block = build_matmul_vectorized_launch_config(m, n)
-        return block
+        return (Engine.VEC_TILE // Engine.VEC_WIDTH, Engine.VEC_TILE // Engine.VBLOCK_ROWS, 1)
     return (args.block_x, args.block_y, 1)
 
 
@@ -48,7 +47,7 @@ def main() -> None:
     b_host = np.random.randn(k, n).astype(np.float32)
     c_ref = a_host @ b_host
 
-    engine = CudaEngine()
+    engine = Engine()
     a_gpu = engine.upload(a_host, name="A")
     b_gpu = engine.upload(b_host, name="B")
 
@@ -56,7 +55,7 @@ def main() -> None:
     c_nbytes = m * n * np.dtype(np.float32).itemsize
     for kernel in kernels:
         c_gpu = engine.alloc(f"C_{kernel}", c_nbytes, reuse=False)
-        block = _resolve_block(args, m, n, kernel)
+        block = _resolve_block(args, kernel)
         stats = gpu_benchmark(
             lambda: engine.run_matmul(
                 a_gpu, b_gpu, c_gpu, m=m, k=k, n=n, kernel=kernel, block=block

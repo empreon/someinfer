@@ -5,13 +5,13 @@ from typing import Optional
 import numpy as np
 import pycuda.driver as cuda
 
-from src.engine import CudaEngine
+from src.engine import Engine
 
 
 class LinearLayer:
     def __init__(
         self,
-        engine: CudaEngine,
+        engine: Engine,
         in_features: int,
         out_features: int,
         weights: Optional[np.ndarray] = None,

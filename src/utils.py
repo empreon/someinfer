@@ -1,46 +1,8 @@
 from __future__ import annotations
 
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict
 
 import pycuda.driver as cuda
-
-
-def ceil_div(value: int, divisor: int) -> int:
-    return (value + divisor - 1) // divisor
-
-
-def build_matmul_launch_config(
-    m: int, n: int, block: Tuple[int, int, int] = (16, 16, 1)
-) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    grid = (ceil_div(n, block[0]), ceil_div(m, block[1]), 1)
-    return grid, block
-
-
-def build_matmul_tiled_launch_config(
-    m: int, n: int, tile_size: int
-) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    block = (tile_size, tile_size, 1)
-    grid = (ceil_div(n, tile_size), ceil_div(m, tile_size), 1)
-    return grid, block
-
-
-def build_matmul_vectorized_launch_config(
-    m: int,
-    n: int,
-    tile_size: int = 32,
-    vec_width: int = 4,
-    vblock_rows: int = 2,
-) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    block = (tile_size // vec_width, tile_size // vblock_rows, 1)
-    grid = (ceil_div(n, tile_size), ceil_div(m, tile_size), 1)
-    return grid, block
-
-
-def build_elementwise_launch_config(
-    numel: int, block: Tuple[int, int, int] = (256, 1, 1)
-) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    grid = (ceil_div(numel, block[0]), 1, 1)
-    return grid, block
 
 
 def gpu_benchmark(

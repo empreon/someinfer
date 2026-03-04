@@ -10,8 +10,8 @@ import pycuda.driver as cuda
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.engine import CudaEngine
-from src.utils import build_matmul_vectorized_launch_config, gemm_gflops, gpu_benchmark
+from src.engine import Engine
+from src.utils import gemm_gflops, gpu_benchmark
 
 
 def _run_cublas_row_major(
@@ -82,7 +82,7 @@ def main() -> None:
     a_host = np.random.randn(m, k).astype(np.float32)
     b_host = np.random.randn(k, n).astype(np.float32)
 
-    engine = CudaEngine()
+    engine = Engine()
 
     a_gpu = engine.upload(a_host, name="A")
     b_gpu = engine.upload(b_host, name="B")
@@ -90,7 +90,7 @@ def main() -> None:
     c_cublas_gpu = engine.alloc("C_cublas", m * n * np.dtype(np.float32).itemsize, reuse=False)
 
     if args.kernel == "vectorized":
-        _, block = build_matmul_vectorized_launch_config(m, n)
+        block = (Engine.VEC_TILE // Engine.VEC_WIDTH, Engine.VEC_TILE // Engine.VBLOCK_ROWS, 1)
     else:
         block = (args.block_x, args.block_y, 1)
 

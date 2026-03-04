@@ -16,10 +16,22 @@ def build_matmul_launch_config(
     return grid, block
 
 
-def build_matmul_vectorized_launch_config(
-    m: int, n: int, tile_size: int = 16, vec_width: int = 4
+def build_matmul_tiled_launch_config(
+    m: int, n: int, tile_size: int
 ) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
-    block = (tile_size // vec_width, tile_size, 1)
+    block = (tile_size, tile_size, 1)
+    grid = (ceil_div(n, tile_size), ceil_div(m, tile_size), 1)
+    return grid, block
+
+
+def build_matmul_vectorized_launch_config(
+    m: int,
+    n: int,
+    tile_size: int = 32,
+    vec_width: int = 4,
+    vblock_rows: int = 2,
+) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+    block = (tile_size // vec_width, tile_size // vblock_rows, 1)
     grid = (ceil_div(n, tile_size), ceil_div(m, tile_size), 1)
     return grid, block
 

@@ -126,7 +126,8 @@ class Engine:
         launch_block = default_block if block is None else block
         self._validate_matmul_config(a_gpu, b_gpu, k, n, launch_block)
         function = self.get_kernel("matmul", module_name="fp32/matmul.cu")
-        function(a_gpu, b_gpu, c_gpu, np.int32(m), np.int32(k), np.int32(n), block=launch_block, grid=(_ceil_div(n, self.VEC_TILE), _ceil_div(m, self.VEC_TILE), 1), stream=stream)
+        function.set_attribute(cuda.function_attribute.MAX_DYNAMIC_SHARED_SIZE_BYTES, 66560)
+        function(a_gpu, b_gpu, c_gpu, np.int32(m), np.int32(k), np.int32(n), block=launch_block, grid=(_ceil_div(n, self.VEC_TILE), _ceil_div(m, self.VEC_TILE), 1), stream=stream, shared=66560)
 
     def __matmul__(self, operands: tuple[object, ...]) -> cuda.DeviceAllocation:
         if not isinstance(operands, tuple):

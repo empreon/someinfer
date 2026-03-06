@@ -17,8 +17,9 @@ __device__ __forceinline__ void matmul_tiled(const float* A, const float* B, flo
     return;
   }
 
-  __shared__ float tile_a[kTileSize][kTileSize];
-  __shared__ float tile_b[kTileSize][kTileSize];
+  extern __shared__ float shared_mem[];
+  float (*tile_a)[kTileSize] = reinterpret_cast<float (*)[kTileSize]>(shared_mem);
+  float (*tile_b)[kTileSize] = reinterpret_cast<float (*)[kTileSize]>(shared_mem + kTileSize * kTileSize);
 
   const int local_row = threadIdx.y;
   const int local_col = threadIdx.x;
@@ -52,8 +53,9 @@ __device__ __forceinline__ void matmul_vectorized_2d(const float* __restrict__ A
   constexpr int kVecWidth = MM_VEC_WIDTH;
   constexpr int kVBlockRows = MM_VBLOCK_ROWS;
 
-  __shared__ float tile_a[kVecTileSize][kVecTileSize + 1];
-  __shared__ float tile_b[kVecTileSize][kVecTileSize + 1];
+  extern __shared__ float shared_mem[];
+  float (*tile_a)[kVecTileSize + 1] = reinterpret_cast<float (*)[kVecTileSize + 1]>(shared_mem);
+  float (*tile_b)[kVecTileSize + 1] = reinterpret_cast<float (*)[kVecTileSize + 1]>(shared_mem + kVecTileSize * (kVecTileSize + 1));
 
   const int local_row_block = threadIdx.y;
   const int local_col_vec = threadIdx.x;
@@ -282,8 +284,8 @@ __device__ __forceinline__ void matmul_asymetric_pipelined_2d(const float* __res
   constexpr int kStrideB = kTotalThreads / kVecsPerRowB;
 
   extern __shared__ float shared_mem[];
-  float (*tile_a)[kVecTileSizeK][kVecTileSizeM + 1] = reinterpret_cast<float (*)[kVecTileSizeK][kVecTileSizeM + 1]>(shared_mem);
-  float (*tile_b)[kVecTileSizeK][kVecTileSizeN + 1] = reinterpret_cast<float (*)[kVecTileSizeK][kVecTileSizeN + 1]>(shared_mem + kVecTileSizeK * (kVecTileSizeM + 1));
+  float (*tile_a)[kVecTileSizeM][kVecTileSizeK + 1] = reinterpret_cast<float (*)[kVecTileSizeM][kVecTileSizeK + 1]>(shared_mem);
+  float (*tile_b)[kVecTileSizeK][kVecTileSizeN + 1] = reinterpret_cast<float (*)[kVecTileSizeK][kVecTileSizeN + 1]>(shared_mem + 2 * kVecTileSizeM * (kVecTileSizeK + 1));
 
   int local_row_block = threadIdx.y;
   int local_col_vec = threadIdx.x;
@@ -294,10 +296,10 @@ __device__ __forceinline__ void matmul_asymetric_pipelined_2d(const float* __res
 
   int load_a_row = tid / (kVecTileSizeK / kVecWidth);
   int load_a_col = (tid % (kVecTileSizeK / kVecWidth)) * kVecWidth;
-  const float* a_load_ptr = A + (blockIdx.y * kVecTileSizeM + load_a_row) * K + (load_a_col * kVecWidth);
+  const float* a_load_ptr = A + (blockIdx.y * kVecTileSizeM + load_a_row) * K + load_a_col;
 
-  int load_b_row = tid / (kVecTileSizeK / kVecWidth);
-  int load_b_col = (tid % (kVecTileSizeK / kVecWidth)) * kVecWidth;
+  int load_b_row = tid / (kVecTileSizeN / kVecWidth);
+  int load_b_col = (tid % (kVecTileSizeN / kVecWidth)) * kVecWidth;
   const float* b_load_ptr = B + (load_b_row * N) + (blockIdx.x * kVecTileSizeN + load_b_col);
 
   float4 acc[kVBlockRows];
@@ -417,7 +419,208 @@ __device__ __forceinline__ void matmul_asymetric_pipelined_2d(const float* __res
   }
 }
 
+__device__ __forceinline__ void matmul_register_pipelined_2d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, int M, int K, int N) {
+  constexpr int kVecTileSizeM = MM_VEC_TILE_M;
+  constexpr int kVecTileSizeN = MM_VEC_TILE_N;
+  constexpr int kVecTileSizeK = MM_VEC_TILE_K;
+  constexpr int kVecWidth = MM_VEC_WIDTH; 
+  constexpr int kVBlockRows = MM_VBLOCK_ROWS;
+
+  constexpr int kThreadsX = kVecTileSizeN / (kVecWidth * 2); // Each thread loads 2 vectors from B
+  constexpr int kThreadsY = kVecTileSizeM / kVBlockRows;
+  constexpr int kTotalThreads = kThreadsX * kThreadsY;
+
+  constexpr int kVecsPerRowA = kVecTileSizeK / kVecWidth;
+  constexpr int kStepsA = (kVecTileSizeM * kVecsPerRowA) / kTotalThreads;
+  constexpr int kStrideA = kTotalThreads / kVecsPerRowA;
+
+  constexpr int kVecsPerRowB = kVecTileSizeN / kVecWidth;
+  constexpr int kStepsB = (kVecTileSizeK * kVecsPerRowB) / kTotalThreads;
+  constexpr int kStrideB = kTotalThreads / kVecsPerRowB;
+
+  extern __shared__ float shared_mem[];
+  float (*tile_a)[kVecTileSizeM][kVecTileSizeK + 1] = reinterpret_cast<float (*)[kVecTileSizeM][kVecTileSizeK + 1]>(shared_mem);
+  float (*tile_b)[kVecTileSizeK][kVecTileSizeN + 1] = reinterpret_cast<float (*)[kVecTileSizeK][kVecTileSizeN + 1]>(shared_mem + 2 * kVecTileSizeM * (kVecTileSizeK + 1));
+
+  int local_row_block = threadIdx.y;
+  int local_col_vec = threadIdx.x;
+  int row_base = blockIdx.y * kVecTileSizeM + local_row_block * kVBlockRows;
+  int col_base = blockIdx.x * kVecTileSizeN + local_col_vec * (kVecWidth * 2);
+
+  const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+  int load_a_row = tid / (kVecTileSizeK / kVecWidth);
+  int load_a_col = (tid % (kVecTileSizeK / kVecWidth)) * kVecWidth;
+  const float* a_load_ptr = A + (blockIdx.y * kVecTileSizeM + load_a_row) * K + load_a_col;
+
+  int load_b_row = tid / (kVecTileSizeN / kVecWidth);
+  int load_b_col = (tid % (kVecTileSizeN / kVecWidth)) * kVecWidth;
+  const float* b_load_ptr = B + (load_b_row * N) + (blockIdx.x * kVecTileSizeN + load_b_col);
+
+  float4 acc[kVBlockRows][2];
+  #pragma unroll
+  for (int i = 0; i < kVBlockRows; ++i) {
+    acc[i][0] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    acc[i][1] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+  }
+  const int tile_count = CEIL_DIV(K, kVecTileSizeK);
+
+  #pragma unroll
+  for (int step = 0; step < kStepsA; ++step) {
+    float4 a_vec = *reinterpret_cast<const float4*>(a_load_ptr + (step * kStrideA) * K);
+    tile_a[0][load_a_row + (step * kStrideA)][load_a_col + 0] = a_vec.x;
+    tile_a[0][load_a_row + (step * kStrideA)][load_a_col + 1] = a_vec.y;
+    tile_a[0][load_a_row + (step * kStrideA)][load_a_col + 2] = a_vec.z;
+    tile_a[0][load_a_row + (step * kStrideA)][load_a_col + 3] = a_vec.w;
+  }
+
+  #pragma unroll
+  for (int step = 0; step < kStepsB; ++step) {
+    float4 b_vec = *reinterpret_cast<const float4*>(b_load_ptr + (step * kStrideB) * N);
+    tile_b[0][load_b_row + (step * kStrideB)][load_b_col + 0] = b_vec.x;
+    tile_b[0][load_b_row + (step * kStrideB)][load_b_col + 1] = b_vec.y;
+    tile_b[0][load_b_row + (step * kStrideB)][load_b_col + 2] = b_vec.z;
+    tile_b[0][load_b_row + (step * kStrideB)][load_b_col + 3] = b_vec.w;
+  }
+  __syncthreads();
+
+  a_load_ptr += kVecTileSizeK;
+  b_load_ptr += kVecTileSizeK * N;
+
+  #pragma unroll
+  for (int tile_idx = 1; tile_idx < tile_count; ++tile_idx) {
+    const int current_buffer = tile_idx % 2;
+    const int next_buffer = (tile_idx + 1) % 2;
+
+    float4 a_vec_next[kStepsA];
+    #pragma unroll
+    for (int step = 0; step < kStepsA; ++step) {
+      a_vec_next[step] = *reinterpret_cast<const float4*>(a_load_ptr + (step * kStrideA) * K);
+    }
+
+    float4 b_vec_next[kStepsB];
+    #pragma unroll
+    for (int step = 0; step < kStepsB; ++step) {
+      b_vec_next[step] = *reinterpret_cast<const float4*>(b_load_ptr + (step * kStrideB) * N);
+    }
+
+    #pragma unroll
+    for (int k_local = 0; k_local < kVecTileSizeK; ++k_local) {
+      const int b_col_start = local_col_vec * (kVecWidth * 2);
+      const float4 b_values1 = make_float4(
+          tile_b[current_buffer][k_local][b_col_start + 0],
+          tile_b[current_buffer][k_local][b_col_start + 1],
+          tile_b[current_buffer][k_local][b_col_start + 2],
+          tile_b[current_buffer][k_local][b_col_start + 3]);
+      const float4 b_values2 = make_float4(
+          tile_b[current_buffer][k_local][b_col_start + 4],
+          tile_b[current_buffer][k_local][b_col_start + 5],
+          tile_b[current_buffer][k_local][b_col_start + 6],
+          tile_b[current_buffer][k_local][b_col_start + 7]);
+      
+      float a_flags[kVBlockRows];
+      #pragma unroll
+      for (int row_offset = 0; row_offset < kVBlockRows; ++row_offset) {
+        a_flags[row_offset] = tile_a[current_buffer][local_row_block * kVBlockRows + row_offset][k_local];
+      }
+
+      #pragma unroll
+      for (int row_offset = 0; row_offset < kVBlockRows; ++row_offset) {
+        acc[row_offset][0].x += a_flags[row_offset] * b_values1.x;
+        acc[row_offset][0].y += a_flags[row_offset] * b_values1.y;
+        acc[row_offset][0].z += a_flags[row_offset] * b_values1.z;
+        acc[row_offset][0].w += a_flags[row_offset] * b_values1.w;
+        acc[row_offset][1].x += a_flags[row_offset] * b_values2.x;
+        acc[row_offset][1].y += a_flags[row_offset] * b_values2.y;
+        acc[row_offset][1].z += a_flags[row_offset] * b_values2.z;
+        acc[row_offset][1].w += a_flags[row_offset] * b_values2.w;
+      }
+    }
+
+    #pragma unroll
+    for (int step = 0; step < kStepsA; ++step) {
+      tile_a[next_buffer][load_a_row + (step * kStrideA)][load_a_col + 0] = a_vec_next[step].x;
+      tile_a[next_buffer][load_a_row + (step * kStrideA)][load_a_col + 1] = a_vec_next[step].y;
+      tile_a[next_buffer][load_a_row + (step * kStrideA)][load_a_col + 2] = a_vec_next[step].z;
+      tile_a[next_buffer][load_a_row + (step * kStrideA)][load_a_col + 3] = a_vec_next[step].w;
+    }
+
+    #pragma unroll
+    for (int step = 0; step < kStepsB; ++step) {
+      tile_b[next_buffer][load_b_row + (step * kStrideB)][load_b_col + 0] = b_vec_next[step].x;
+      tile_b[next_buffer][load_b_row + (step * kStrideB)][load_b_col + 1] = b_vec_next[step].y;
+      tile_b[next_buffer][load_b_row + (step * kStrideB)][load_b_col + 2] = b_vec_next[step].z;
+      tile_b[next_buffer][load_b_row + (step * kStrideB)][load_b_col + 3] = b_vec_next[step].w;
+    }
+    __syncthreads();
+
+    a_load_ptr += kVecTileSizeK;
+    b_load_ptr += kVecTileSizeK * N;
+  }
+
+  const int last_buffer = (tile_count - 1) % 2;
+  #pragma unroll
+  for (int k_local = 0; k_local < kVecTileSizeK; ++k_local) {
+    const int b_col_start = local_col_vec * (kVecWidth * 2);
+    const float4 b_values1 = make_float4(
+        tile_b[last_buffer][k_local][b_col_start + 0],
+        tile_b[last_buffer][k_local][b_col_start + 1],
+        tile_b[last_buffer][k_local][b_col_start + 2],
+        tile_b[last_buffer][k_local][b_col_start + 3]);
+    const float4 b_values2 = make_float4(
+        tile_b[last_buffer][k_local][b_col_start + 4],
+        tile_b[last_buffer][k_local][b_col_start + 5],
+        tile_b[last_buffer][k_local][b_col_start + 6],
+        tile_b[last_buffer][k_local][b_col_start + 7]);
+
+    float a_flags[kVBlockRows];
+    #pragma unroll
+    for (int row_offset = 0; row_offset < kVBlockRows; ++row_offset) {
+      a_flags[row_offset] = tile_a[last_buffer][local_row_block * kVBlockRows + row_offset][k_local];
+    }
+
+    #pragma unroll
+    for (int row_offset = 0; row_offset < kVBlockRows; ++row_offset) {
+      acc[row_offset][0].x += a_flags[row_offset] * b_values1.x;
+      acc[row_offset][0].y += a_flags[row_offset] * b_values1.y;
+      acc[row_offset][0].z += a_flags[row_offset] * b_values1.z;
+      acc[row_offset][0].w += a_flags[row_offset] * b_values1.w;
+      acc[row_offset][1].x += a_flags[row_offset] * b_values2.x;
+      acc[row_offset][1].y += a_flags[row_offset] * b_values2.y;
+      acc[row_offset][1].z += a_flags[row_offset] * b_values2.z;
+      acc[row_offset][1].w += a_flags[row_offset] * b_values2.w;
+    }
+  }
+
+  const int c_col_start = col_base;
+  float *c_ptr = &C[ROW_MAJOR_INDEX(row_base, c_col_start, N)];
+  #pragma unroll
+  for (int row_offset = 0; row_offset < kVBlockRows; ++row_offset) {
+    *reinterpret_cast<float4*>(c_ptr + row_offset * N) = acc[row_offset][0];
+    *reinterpret_cast<float4*>(c_ptr + row_offset * N + 4) = acc[row_offset][1];
+  }
+}
+
 extern "C" __global__ void matmul(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, int M, int K, int N) {
-  //matmul_pipelined_2d(A, B, C, M, K, N);
-  matmul_asymetric_pipelined_2d(A, B, C, M, K, N);
+}
+
+extern "C" {
+  __global__ void run_matmul_naive(const float* A, const float* B, float* C, int M, int K, int N) {
+    matmul_naive(A, B, C, M, K, N);
+  }
+  __global__ void run_matmul_tiled(const float* A, const float* B, float* C, int M, int K, int N) {
+    matmul_tiled(A, B, C, M, K, N);
+  }
+  __global__ void run_matmul_vectorized_2d(const float* A, const float* B, float* C, int M, int K, int N) {
+    matmul_vectorized_2d(A, B, C, M, K, N);
+  }
+  __global__ void run_matmul_pipelined_2d(const float* A, const float* B, float* C, int M, int K, int N) {
+    matmul_pipelined_2d(A, B, C, M, K, N);
+  }
+  __global__ void run_matmul_asymetric_pipelined_2d(const float* A, const float* B, float* C, int M, int K, int N) {
+    matmul_asymetric_pipelined_2d(A, B, C, M, K, N);
+  }
+  __global__ void run_matmul_register_pipelined_2d(const float* A, const float* B, float* C, int M, int K, int N) {
+    matmul_register_pipelined_2d(A, B, C, M, K, N);
+  }
 }
